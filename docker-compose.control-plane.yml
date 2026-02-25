@@ -1,0 +1,121 @@
+services:
+  postgres:
+    image: postgres:17
+    container_name: polybot-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-polybot_control_plane}
+      POSTGRES_USER: ${POSTGRES_USER:-polybot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-polybot}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7
+    container_name: polybot-redis
+    ports:
+      - "6379:6379"
+
+  backend:
+    build:
+      context: .
+      dockerfile: apps/backend/Dockerfile
+    container_name: polybot-control-plane
+    env_file:
+      - .env
+    environment:
+      CONTROL_PLANE_DB_ENGINE: postgres
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      CONTROL_PLANE_REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - postgres
+      - redis
+    ports:
+      - "8000:8000"
+
+  celery-worker:
+    build:
+      context: .
+      dockerfile: apps/backend/Dockerfile
+    container_name: polybot-celery-worker
+    env_file:
+      - .env
+    environment:
+      CONTROL_PLANE_DB_ENGINE: postgres
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      CONTROL_PLANE_REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - backend
+    command: celery -A control_plane worker -l info
+
+  celery-beat:
+    build:
+      context: .
+      dockerfile: apps/backend/Dockerfile
+    container_name: polybot-celery-beat
+    env_file:
+      - .env
+    environment:
+      CONTROL_PLANE_DB_ENGINE: postgres
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      CONTROL_PLANE_REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - backend
+    command: celery -A control_plane beat -l info
+
+  frontend:
+    build:
+      context: .
+      dockerfile: apps/frontend/Dockerfile
+      args:
+        NEXT_BASE_PATH: ${NEXT_BASE_PATH:-/bot}
+        NEXT_PUBLIC_CONTROL_PLANE_URL: ${NEXT_PUBLIC_CONTROL_PLANE_URL:-}
+        NEXT_PUBLIC_CONTROL_PLANE_WS_URL: ${NEXT_PUBLIC_CONTROL_PLANE_WS_URL:-}
+        NEXT_PUBLIC_CONTROL_PLANE_TOKEN: ${NEXT_PUBLIC_CONTROL_PLANE_TOKEN:-}
+        DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:-}
+    container_name: polybot-next
+    environment:
+      NEXT_BASE_PATH: ${NEXT_BASE_PATH:-/bot}
+      NEXT_PUBLIC_CONTROL_PLANE_URL: ${NEXT_PUBLIC_CONTROL_PLANE_URL:-}
+      NEXT_PUBLIC_CONTROL_PLANE_WS_URL: ${NEXT_PUBLIC_CONTROL_PLANE_WS_URL:-}
+      NEXT_PUBLIC_CONTROL_PLANE_TOKEN: ${NEXT_PUBLIC_CONTROL_PLANE_TOKEN:-}
+      DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:-}
+    depends_on:
+      - backend
+    ports:
+      - "3000:3000"
+
+  bot-proxy:
+    image: nginx:1.27-alpine
+    container_name: polybot-bot-proxy
+    depends_on:
+      - frontend
+      - backend
+    volumes:
+      - ./deploy/nginx/bot-proxy.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "127.0.0.1:8080:80"
+
+  worker-bridge:
+    build:
+      context: .
+      dockerfile: services/worker/Dockerfile
+    container_name: polybot-worker-bridge
+    env_file:
+      - .env
+    environment:
+      CONTROL_PLANE_URL: http://backend:8000/api/v1
+      CONTROL_PLANE_BRIDGE_TOKEN: ${CONTROL_PLANE_BRIDGE_TOKEN:-change-me-bridge-token}
+      WORKER_SQLITE_PATH: /app/db/polybot.db
+      BRIDGE_POLL_INTERVAL_SECONDS: 5
+    volumes:
+      - ./db:/app/db
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
